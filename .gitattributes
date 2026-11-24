@@ -1,0 +1,9 @@
+* text=auto eol=lf
+*.sh text eol=lf
+openqts-installer text eol=lf
+openqts-console text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+Dockerfile text eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
