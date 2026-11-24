@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+client/dist/
+server/dist/
+
+# Local runtime NAS data & storage pool
+.open-adm-data/
+
+# ISO Builder temp & artifacts
+iso-work/
+dist-iso/
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+*.log

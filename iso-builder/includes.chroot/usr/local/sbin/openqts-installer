@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# OpenQTS 5.2 — Interactive TUI Disk Installer (Proxmox / TrueNAS Style)
+# Runs automatically on TTY1 when booting from the OpenQTS Debian 12 Live USB/ISO
+# ==============================================================================
+set -euo pipefail
+
+export NEWT_COLORS='
+root=white,blue
+window=black,lightgray
+border=black,lightgray
+title=blue,lightgray
+button=white,blue
+actbutton=white,red
+listbox=black,lightgray
+actlistbox=white,blue
+'
+
+if [[ $EUID -ne 0 ]]; then
+  echo "openqts-installer must be run as root."
+  exit 1
+fi
+
+show_banner() {
+  clear
+  cat <<'EOF'
+   ____                    ____ _______ _____   _____   ___
+  / __ \                  / __ \__   __/ ____| | ____| |__ \
+ | |  | |_ __   ___ _ __ | |  | | | | | (___   | |__      ) |
+ | |  | | '_ \ / _ \ '_ \| |  | | | |  \___ \  |___ \    / /
+ | |__| | |_) |  __/ | | | |__| | | |  ____) |  ___) |_ / /_
+  \____/| .__/ \___|_| |_|\___\_\ |_| |_____/  |____/(_)____|
+        | |  Debian 12 DIY PC NAS Operating System Installer
+        |_|
+EOF
+}
+
+show_banner
+
+whiptail --title "OpenQTS 5.2 Installer" --yesno \
+"Welcome to the OpenQTS 5.2 DIY PC NAS Operating System Installer.\n\n\
+This wizard will install OpenQTS (Debian 12 Bookworm + SMB/NFS + mdadm RAID + Btrfs Snapshots + Docker + Web Desktop) onto an internal SSD/HDD/NVMe drive.\n\n\
+Proceed with installation?" 15 74 || exit 0
+
+# 1. Discover internal disks (exclude loop, rom, and live USB boot media)
+LIVE_DEV=$(findmnt -n -o SOURCE /run/live/medium 2>/dev/null | sed 's/[0-9]*$//' | sed 's/p$//' || true)
+DISK_MENU=()
+while read -r NAME SIZE MODEL TRAN; do
+  DEV="/dev/${NAME}"
+  [[ "$DEV" == "$LIVE_DEV" ]] && continue
+  DESC="${SIZE} | ${MODEL:-Generic Disk} (${TRAN:-SATA/NVMe})"
+  DISK_MENU+=("$DEV" "$DESC")
+done < <(lsblk -d -n -o NAME,SIZE,MODEL,TRAN -e 7,11)
+
+if [[ ${#DISK_MENU[@]} -eq 0 ]]; then
+  whiptail --title "No Target Disk Found" --msgbox \
+  "No installable internal hard drives or SSDs were detected.\nDropping to rescue shell." 10 64
+  exec /bin/bash
+fi
+
+TARGET_DISK=$(whiptail --title "Select Target OS Disk" --menu \
+"Choose the disk where OpenQTS 5.2 OS will be installed.\nWARNING: All existing data on the selected disk will be erased!" \
+18 76 8 "${DISK_MENU[@]}" 3>&1 1>&2 2>&3) || exit 0
+
+NAS_HOST=$(whiptail --title "NAS Hostname" --inputbox \
+"Enter hostname for this NAS appliance (used for SMB & .local discovery):" \
+10 64 "openqts-nas" 3>&1 1>&2 2>&3) || exit 0
+NAS_HOST=$(echo "$NAS_HOST" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
+[[ -z "$NAS_HOST" ]] && NAS_HOST="openqts-nas"
+
+ROOT_PASS=$(whiptail --title "System Root Password" --passwordbox \
+"Set the Linux root / SSH password (Web UI admin can be configured in the First-Boot Wizard):" \
+10 64 3>&1 1>&2 2>&3) || exit 0
+[[ -z "$ROOT_PASS" ]] && ROOT_PASS="openqts"
+
+whiptail --title "Confirm Disk Erase" --defaultno --yesno \
+"FINAL WARNING!\n\n\
+Target Disk : ${TARGET_DISK}\n\
+Hostname    : ${NAS_HOST}\n\n\
+All partitions and data on ${TARGET_DISK} will be permanently destroyed.\n\
+Start installation now?" 14 70 || exit 0
+
+show_banner
+echo "[1/6] Partitioning ${TARGET_DISK} (GPT: BIOS Boot + EFI + Root + Btrfs Data)..."
+wipefs -af "${TARGET_DISK}"
+parted -s "${TARGET_DISK}" mklabel gpt
+parted -s "${TARGET_DISK}" mkpart bios_grub 1MiB 3MiB
+parted -s "${TARGET_DISK}" set 1 bios_grub on
+parted -s "${TARGET_DISK}" mkpart ESP fat32 3MiB 515MiB
+parted -s "${TARGET_DISK}" set 2 esp on
+parted -s "${TARGET_DISK}" mkpart primary ext4 515MiB 24GiB
+parted -s "${TARGET_DISK}" mkpart primary btrfs 24GiB 100%
+partprobe "${TARGET_DISK}"
+sleep 2
+
+if [[ "${TARGET_DISK}" == *"nvme"* || "${TARGET_DISK}" == *"mmcblk"* ]]; then
+  P_EFI="${TARGET_DISK}p2"
+  P_ROOT="${TARGET_DISK}p3"
+  P_DATA="${TARGET_DISK}p4"
+else
+  P_EFI="${TARGET_DISK}2"
+  P_ROOT="${TARGET_DISK}3"
+  P_DATA="${TARGET_DISK}4"
+fi
+
+echo "[2/6] Formatting filesystems (FAT32 EFI, EXT4 Root, Btrfs NAS Pool)..."
+mkfs.vfat -F32 "${P_EFI}"
+mkfs.ext4 -F -L OPENQTS_ROOT "${P_ROOT}"
+mkfs.btrfs -f -L OPENQTS_DATA "${P_DATA}"
+
+MNT="/mnt/openqts-target"
+mkdir -p "${MNT}"
+mount "${P_ROOT}" "${MNT}"
+mkdir -p "${MNT}/boot/efi" "${MNT}/srv/open-qts"
+mount "${P_EFI}" "${MNT}/boot/efi"
+mount "${P_DATA}" "${MNT}/srv/open-qts"
+
+# Create Btrfs subvolume for real snapshots
+btrfs subvolume create "${MNT}/srv/open-qts/storage"
+mkdir -p "${MNT}/srv/open-qts/storage/Public" \
+  "${MNT}/srv/open-qts/storage/Media/Music" \
+  "${MNT}/srv/open-qts/storage/Media/Movies" \
+  "${MNT}/srv/open-qts/storage/Media/Photos" \
+  "${MNT}/srv/open-qts/storage/Backups" \
+  "${MNT}/srv/open-qts/storage/Home" \
+  "${MNT}/srv/open-qts/storage/Downloads"
+
+echo "[3/6] Copying OpenQTS 5.2 operating system image to ${P_ROOT}..."
+if [[ -f /run/live/medium/live/filesystem.squashfs ]]; then
+  unsquashfs -f -d "${MNT}" /run/live/medium/live/filesystem.squashfs
+else
+  rsync -aAX --exclude={"/dev/*","/proc/*","/sys/*","/tmp/*","/run/*","/mnt/*","/media/*","/lost+found"} / "${MNT}/"
+fi
+
+echo "[4/6] Configuring fstab, hostname, credentials, and appliance mode..."
+UUID_ROOT=$(blkid -s UUID -o value "${P_ROOT}")
+UUID_EFI=$(blkid -s UUID -o value "${P_EFI}")
+UUID_DATA=$(blkid -s UUID -o value "${P_DATA}")
+
+cat >"${MNT}/etc/fstab" <<EOF
+UUID=${UUID_ROOT}  /              ext4   errors=remount-ro  0  1
+UUID=${UUID_EFI}   /boot/efi      vfat   umask=0077         0  1
+UUID=${UUID_DATA}  /srv/open-qts  btrfs  defaults,noatime,compress=zstd:1  0  2
+EOF
+
+echo "${NAS_HOST}" >"${MNT}/etc/hostname"
+sed -i "s/127.0.1.1.*/127.0.1.1\t${NAS_HOST}/g" "${MNT}/etc/hosts" || true
+echo "root:${ROOT_PASS}" | chroot "${MNT}" chpasswd
+
+# Switch TTY1 autologin from installer -> OpenQTS Console on the installed system
+rm -f "${MNT}/etc/openqts-live-mode"
+mkdir -p "${MNT}/etc/systemd/system/getty@tty1.service.d"
+cat >"${MNT}/etc/systemd/system/getty@tty1.service.d/override.conf" <<'EOF'
+[Service]
+ExecStart=
+ExecStart=-/usr/local/sbin/openqts-console
+StandardInput=tty
+StandardOutput=tty
+TTYPath=/dev/tty1
+Restart=always
+EOF
+
+# Mark first boot so customer sees OpenQTS Smart Installation Guide in Web UI
+cat >"${MNT}/etc/default/open-qts" <<'EOF'
+NODE_ENV=production
+PORT=8000
+OPEN_ADM_DATA=/srv/open-qts
+OPEN_ADM_STORAGE=/srv/open-qts/storage
+OPEN_QTS_APPLIANCE=true
+OPEN_QTS_FIRST_BOOT=true
+EOF
+
+echo "[5/6] Installing GRUB bootloader (UEFI + Legacy BIOS hybrid)..."
+for fs in /dev /dev/pts /proc /sys /run; do
+  mount --bind "$fs" "${MNT}${fs}"
+done
+
+chroot "${MNT}" update-initramfs -u -k all || true
+chroot "${MNT}" grub-install --target=i386-pc --recheck "${TARGET_DISK}" || true
+if [[ -d /sys/firmware/efi ]]; then
+  chroot "${MNT}" grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=OpenQTS --removable --recheck || true
+else
+  chroot "${MNT}" grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=OpenQTS --removable --no-nvram --recheck || true
+fi
+chroot "${MNT}" update-grub
+chroot "${MNT}" systemctl enable open-qts.service smbd nmbd avahi-daemon docker systemd-networkd || true
+
+echo "[6/6] Syncing disks and unmounting..."
+for fs in /run /sys /proc /dev/pts /dev; do
+  umount -lf "${MNT}${fs}" 2>/dev/null || true
+done
+umount -lf "${MNT}/srv/open-qts" "${MNT}/boot/efi" "${MNT}" 2>/dev/null || true
+sync
+
+whiptail --title "Installation Complete!" --msgbox \
+"OpenQTS 5.2 has been installed onto ${TARGET_DISK}!\n\n\
+Please remove the USB installation media and press OK to reboot.\n\
+After reboot, the console will display your NAS Web UI URL (http://<IP>:8000)." 12 72
+
+reboot

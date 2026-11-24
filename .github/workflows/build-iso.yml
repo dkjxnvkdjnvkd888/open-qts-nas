@@ -1,0 +1,39 @@
+name: Build OpenQTS 5.2 Bootable Debian 12 ISO
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-iso:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout OpenQTS Repository
+        uses: actions/checkout@v4
+
+      - name: Free Disk Space for ISO Build
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
+          df -h
+
+      - name: Build Debian 12 Hybrid Bootable ISO (UEFI + BIOS)
+        run: sudo bash iso-builder/build-iso.sh
+
+      - name: Generate SHA256 Checksum
+        run: |
+          cd dist-iso
+          sha256sum open-qts-5.2-amd64.iso > open-qts-5.2-amd64.iso.sha256
+          ls -lh
+
+      - name: Upload Bootable ISO Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: open-qts-5.2-amd64-iso
+          path: |
+            dist-iso/open-qts-5.2-amd64.iso
+            dist-iso/open-qts-5.2-amd64.iso.sha256
+          retention-days: 14

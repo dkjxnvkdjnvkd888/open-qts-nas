@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# OpenQTS 5.2 — TTY1 Appliance Console (TrueNAS / Proxmox Style)
+# Displays live LAN IP, Web UI URL, Service Status & Quick Console Setup Menu
+# ==============================================================================
+set -u
+
+while true; do
+  clear
+  HOST=$(hostname)
+  LAN_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+  [[ -z "$LAN_IP" ]] && LAN_IP="Acquiring DHCP..."
+  QTS_STATE=$(systemctl is-active open-qts.service 2>/dev/null || echo "stopped")
+  SMB_STATE=$(systemctl is-active smbd.service 2>/dev/null || echo "stopped")
+  DOC_STATE=$(systemctl is-active docker.service 2>/dev/null || echo "stopped")
+  UPTIME_STR=$(uptime -p 2>/dev/null || echo "up")
+
+  cat <<EOF
+================================================================================
+   ____                    ____ _______ _____   _____   ___
+  / __ \                  / __ \__   __/ ____| | ____| |__ \\
+ | |  | |_ __   ___ _ __ | |  | | | | | (___   | |__      ) |
+ | |  | | '_ \ / _ \ '_ \| |  | | | |  \___ \  |___ \    / /
+ | |__| | |_) |  __/ | | | |__| | | |  ____) |  ___) |_ / /_
+  \____/| .__/ \___|_| |_|\___\_\ |_| |_____/  |____/(_)____|
+        |_|  Debian 12 DIY PC NAS Operating System (x86_64)
+================================================================================
+
+  Hostname       : ${HOST}
+  Web Interface  : http://${LAN_IP}:8000
+                   http://${HOST}.local:8000
+  SMB Shares     : \\\\${LAN_IP}\\Public   |   \\\\${LAN_IP}\\Media
+  Uptime         : ${UPTIME_STR}
+
+  Services       : OpenQTS [${QTS_STATE}]  |  Samba [${SMB_STATE}]  |  Docker [${DOC_STATE}]
+
+--------------------------------------------------------------------------------
+  Console Setup Menu:
+    1) Configure Network Interface (DHCP / Static IP)
+    2) Restart OpenQTS Web Service
+    3) Open Linux Administrator Shell
+    4) Reboot NAS
+    5) Shut Down NAS
+    r) Refresh Status
+--------------------------------------------------------------------------------
+EOF
+
+  read -r -t 15 -p "Enter an option [1-5, r]: " CHOICE || CHOICE="r"
+  case "$CHOICE" in
+    1)
+      echo ""
+      ip -br addr
+      read -r -p "Interface name (e.g. eth0 / enp1s0): " IFACE
+      read -r -p "Mode (dhcp / static): " MODE
+      if [[ -n "$IFACE" ]]; then
+        mkdir -p /etc/systemd/network
+        if [[ "$MODE" == "static" ]]; then
+          read -r -p "Static IP/CIDR (e.g. 192.168.1.50/24): " IP_CIDR
+          read -r -p "Gateway (e.g. 192.168.1.1): " GW
+          read -r -p "DNS (e.g. 1.1.1.1): " DNS
+          cat >"/etc/systemd/network/10-openqts-${IFACE}.network" <<NETEOF
+[Match]
+Name=${IFACE}
+
+[Network]
+Address=${IP_CIDR}
+Gateway=${GW}
+DNS=${DNS:-1.1.1.1}
+NETEOF
+        else
+          cat >"/etc/systemd/network/10-openqts-${IFACE}.network" <<NETEOF
+[Match]
+Name=${IFACE}
+
+[Network]
+DHCP=yes
+NETEOF
+        fi
+        systemctl restart systemd-networkd
+        echo "Network configuration applied. Press Enter..."
+        read -r
+      fi
+      ;;
+    2)
+      systemctl restart open-qts.service smbd.service
+      echo "Restarted OpenQTS & Samba. Press Enter..."
+      read -r
+      ;;
+    3)
+      echo "Type 'exit' to return to OpenQTS Console."
+      /bin/bash -l
+      ;;
+    4)
+      systemctl reboot
+      ;;
+    5)
+      systemctl poweroff
+      ;;
+    *)
+      ;;
+  esac
+done
